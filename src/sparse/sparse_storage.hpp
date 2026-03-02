@@ -8,8 +8,7 @@
 #include <unordered_set>
 #include <filesystem>
 #include "mdbx/mdbx.h"
-#include "bmw.hpp"
-#include "sparse_vector.hpp"
+#include "inverted_index.hpp"
 #include "../utils/log.hpp"
 
 namespace ndd {
@@ -19,7 +18,7 @@ namespace ndd {
         explicit SparseVectorStorage(const std::string& db_path) :
             db_path_(db_path),
             env_(nullptr) {
-            bmw_index_ = nullptr;
+            sparse_index_ = nullptr;
         }
 
         ~SparseVectorStorage() { closeMDBX(); }
@@ -30,8 +29,8 @@ namespace ndd {
                 return false;
             }
 
-            bmw_index_ = std::make_unique<BMWIndex>(env_, 0);  // Vocab size unknown/dynamic
-            if(!bmw_index_->initialize()) {
+            sparse_index_ = std::make_unique<InvertedIndex>(env_, 0);  // Vocab size unknown/dynamic
+            if(!sparse_index_->initialize()) {
                 return false;
             }
 
@@ -51,7 +50,7 @@ namespace ndd {
                         storage_->env_, nullptr, static_cast<MDBX_txn_flags_t>(flags), &txn_);
                 if(rc != 0) {
                     throw std::runtime_error("Failed to begin transaction: "
-                                             + std::string(mdbx_strerror(rc)));
+                                                + std::string(mdbx_strerror(rc)));
                 }
             }
 
@@ -93,12 +92,12 @@ namespace ndd {
                 }
 
                 // 2. Update Index
-                if(!storage_->bmw_index_->addDocumentsBatch(txn_, {{doc_id, vec}})) {
+                if(!storage_->sparse_index_->addDocumentsBatch(txn_, {{doc_id, vec}})) {
                     return false;
                 }
 
-                // 3. Save Metadata (Handled internally by BMWIndex per term)
-                // if (!storage_->bmw_index_->saveMetadata(txn_)) return false;
+                // 3. Save Metadata (Handled internally by InvertedIndex per term)
+                // if (!storage_->sparse_index_->saveMetadata(txn_)) return false;
 
                 storage_->vector_count_++;
                 return true;
@@ -120,7 +119,7 @@ namespace ndd {
                 }
 
                 // 2. Remove from Index
-                if(!storage_->bmw_index_->removeDocument(txn_, doc_id, *vec)) {
+                if(!storage_->sparse_index_->removeDocument(txn_, doc_id, *vec)) {
                     return false;
                 }
 
@@ -130,7 +129,7 @@ namespace ndd {
                 }
 
                 // 4. Save Metadata (Handled internally)
-                // if (!storage_->bmw_index_->saveMetadata(txn_)) return false;
+                // if (!storage_->sparse_index_->saveMetadata(txn_)) return false;
 
                 storage_->vector_count_--;
                 return true;
@@ -183,7 +182,7 @@ namespace ndd {
             // Get old vector to remove from index
             auto old_vec = txn->get_vector(doc_id);
             if(old_vec) {
-                if(!bmw_index_->removeDocument(txn->getTxn(), doc_id, *old_vec)) {
+                if(!sparse_index_->removeDocument(txn->getTxn(), doc_id, *old_vec)) {
                     txn->abort();
                     return false;
                 }
@@ -196,13 +195,13 @@ namespace ndd {
             }
 
             // Add to index
-            if(!bmw_index_->addDocumentsBatch(txn->getTxn(), {{doc_id, vec}})) {
+            if(!sparse_index_->addDocumentsBatch(txn->getTxn(), {{doc_id, vec}})) {
                 txn->abort();
                 return false;
             }
 
             // Save metadata (Handled internally)
-            // if (!bmw_index_->saveMetadata(txn->getTxn())) {
+            // if (!sparse_index_->saveMetadata(txn->getTxn())) {
             //    txn->abort();
             //    return false;
             // }
@@ -222,13 +221,13 @@ namespace ndd {
                 }
             }
 
-            if(!bmw_index_->addDocumentsBatch(txn->getTxn(), batch)) {
+            if(!sparse_index_->addDocumentsBatch(txn->getTxn(), batch)) {
                 txn->abort();
                 return false;
             }
 
             // Metadata handled internally
-            // if (!bmw_index_->saveMetadata(txn->getTxn())) {
+            // if (!sparse_index_->saveMetadata(txn->getTxn())) {
             //    txn->abort();
             //    return false;
             // }
@@ -252,15 +251,13 @@ namespace ndd {
             return txn->commit();
         }
 
-        // Search (delegates to BMW)
         std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query, size_t k, const ndd::RoaringBitmap* filter = nullptr) {
-            // return bmw_index_->search(query, k, filter);
-            return bmw_index_->searchBatched(query, k, filter);
+            return sparse_index_->search(query, k, filter);
         }
 
         // Statistics
         size_t get_vector_count() const { return vector_count_; }
-        size_t get_term_count() const { return bmw_index_ ? bmw_index_->getTermCount() : 0; }
+        size_t get_term_count() const { return sparse_index_ ? sparse_index_->getTermCount() : 0; }
 
         // Maintenance
         bool compact() {
@@ -278,7 +275,7 @@ namespace ndd {
         MDBX_env* env_;
         MDBX_dbi docs_dbi_;
 
-        std::unique_ptr<BMWIndex> bmw_index_;
+        std::unique_ptr<InvertedIndex> sparse_index_;
         mutable std::shared_mutex mutex_;
 
         std::atomic<size_t> vector_count_{0};
