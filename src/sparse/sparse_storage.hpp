@@ -107,6 +107,7 @@ namespace ndd {
                 return storage_->getVectorInternal(txn_, doc_id);
             }
 
+
             bool delete_vector(ndd::idInt doc_id) {
                 if(read_only_) {
                     return false;
@@ -214,8 +215,8 @@ namespace ndd {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             auto txn = begin_transaction(false);
 
-            for(const auto& [doc_id, vec] : batch) {
-                if(!storeVectorInternal(txn->getTxn(), doc_id, vec)) {
+            for(const auto& [doc_id, sparse_vec] : batch) {
+                if(!storeVectorInternal(txn->getTxn(), doc_id, sparse_vec)) {
                     txn->abort();
                     return false;
                 }
@@ -239,6 +240,8 @@ namespace ndd {
             return false;
         }
 
+        /*NOT BEING USED*/
+#if 0
         bool delete_vectors_batch(const std::vector<ndd::idInt>& doc_ids) {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             auto txn = begin_transaction(false);
@@ -250,6 +253,7 @@ namespace ndd {
             }
             return txn->commit();
         }
+#endif //if 0
 
         std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query,
                                                         size_t k,

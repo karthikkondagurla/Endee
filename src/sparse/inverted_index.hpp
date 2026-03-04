@@ -39,7 +39,7 @@ namespace ndd {
 #pragma pack(push, 1)
     struct PostingListHeader {
         uint8_t version = 5;       // format version
-        uint32_t n = 0;            // total number of entries (including tombstones)
+        uint32_t nr_entries = 0;   // total number of entries (including tombstones)
         uint32_t live_count = 0;   // entries with value > 0
         float max_value = 0.0f;    // largest weight in the list (used for quantization & pruning)
     };

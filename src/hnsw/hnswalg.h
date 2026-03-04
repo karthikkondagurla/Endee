@@ -456,6 +456,7 @@ namespace hnswlib {
             for(size_t i = 0; i < curElementsCount_; i++) {
                 idInt label = getExternalLabel(i);
                 if(label >= maxElements_) {
+                    break;
                     // Oops.. The index is corrupted
                     LOG_DEBUG("Corrupt index: label "
                               << label << " at i=" << i

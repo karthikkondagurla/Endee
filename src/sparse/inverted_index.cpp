@@ -535,7 +535,7 @@ namespace ndd {
                 return {nullptr, nullptr, 0, 0, 0.0f};
             }
 
-            uint32_t n = header->n;
+            uint32_t n = header->nr_entries;
             const uint8_t* ptr =
                 (const uint8_t*)data.iov_base + sizeof(PostingListHeader);
             const uint32_t* doc_ids = (const uint32_t*)ptr;
@@ -576,17 +576,22 @@ namespace ndd {
         int rc = mdbx_get(txn, term_postings_dbi_, &key, &data);
 
         std::vector<PostingListEntry> entries;
+
+        /**
+         * XXX: if data.iov_len > 0 but < sizeof(PostingListHeader)
+         * something went wrong. We should update the db with that.
+         */
         if (rc != MDBX_SUCCESS || data.iov_len < sizeof(PostingListHeader)) {
             return entries;
         }
 
         const PostingListHeader* header = (const PostingListHeader*)data.iov_base;
         if (header->version != 5) {
-            LOG_ERROR("Unsupported posting list version: " << (int)header->version);
+            LOG_ERROR("Unsupported sparse_index posting list version: " << (int)header->version);
             return entries;
         }
 
-        uint32_t n = header->n;
+        uint32_t nr_entries = header->nr_entries;
 
         if (out_live_count){
             *out_live_count = header->live_count;
@@ -596,21 +601,21 @@ namespace ndd {
             *out_max_value = header->max_value;
         }
 
-        entries.resize(n);
+        entries.resize(nr_entries);
 
         const uint8_t* ptr =
             (const uint8_t*)data.iov_base + sizeof(PostingListHeader);
         const uint32_t* doc_ids = (const uint32_t*)ptr;
 
 #if defined(NDD_INV_IDX_STORE_FLOATS)
-        const float* vals = (const float*)(ptr + n * sizeof(uint32_t));
-        for (uint32_t i = 0; i < n; i++) {
+        const float* vals = (const float*)(ptr + (nr_entries * sizeof(uint32_t)));
+        for (uint32_t i = 0; i < nr_entries; i++) {
             entries[i].doc_id = doc_ids[i];
             entries[i].value = vals[i];
         }
 #else
-        const uint8_t* vals = ptr + n * sizeof(uint32_t);
-        for (uint32_t i = 0; i < n; i++) {
+        const uint8_t* vals = ptr + (nr_entries * sizeof(uint32_t));
+        for (uint32_t i = 0; i < nr_entries; i++) {
             entries[i].doc_id = doc_ids[i];
             entries[i].value = dequantize(vals[i], header->max_value);
         }
@@ -634,7 +639,7 @@ namespace ndd {
 
         PostingListHeader header;
         header.version = 5;
-        header.n = n;
+        header.nr_entries = n;
         header.live_count = live_count;
         header.max_value = max_val;
 
@@ -752,10 +757,10 @@ namespace ndd {
 
         for (size_t d = 0; d < docs.size(); d++) {
             ndd::idInt doc_id = docs[d].first;
-            const SparseVector& vec = docs[d].second;
-            for (size_t i = 0; i < vec.indices.size(); i++) {
-                term_updates[vec.indices[i]].push_back(
-                    std::make_pair(doc_id, vec.values[i]));
+            const SparseVector& sparse_vec = docs[d].second;
+            for (size_t i = 0; i < sparse_vec.indices.size(); i++) {
+                term_updates[sparse_vec.indices[i]].push_back(
+                    std::make_pair(doc_id, sparse_vec.values[i]));
             }
         }
 
@@ -763,6 +768,7 @@ namespace ndd {
             uint32_t term_id = it->first;
             std::vector<std::pair<ndd::idInt, float>>& updates = it->second;
 
+            //sorted by doc_ids
             std::sort(updates.begin(), updates.end());
 
             std::vector<PostingListEntry> existing = loadPostingList(txn, term_id);
@@ -774,11 +780,12 @@ namespace ndd {
             float max_val = 0.0f;
 
             /* updates the live_count and max_val */
-            auto track = [&](const PostingListEntry& e) {
-                merged.push_back(e);
-                if (e.value > 0.0f) {
+            auto track = [&](const PostingListEntry& entry) {
+                /*TODO: push_back only if value > 0.0f*/
+                merged.push_back(entry);
+                if (entry.value > 0.0f) {
                     live_count++;
-                    if (e.value > max_val) max_val = e.value;
+                    if (entry.value > max_val) max_val = entry.value;
                 }
             };
 
@@ -818,8 +825,8 @@ namespace ndd {
     }
 
     bool InvertedIndex::removeDocumentInternal(MDBX_txn* txn,
-                                          ndd::idInt doc_id,
-                                          const SparseVector& vec)
+                                            ndd::idInt doc_id,
+                                            const SparseVector& vec)
     {
         for (size_t i = 0; i < vec.indices.size(); i++) {
             uint32_t term_id = vec.indices[i];
