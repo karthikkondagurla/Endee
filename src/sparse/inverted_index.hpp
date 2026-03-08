@@ -1,20 +1,17 @@
 #pragma once
 
-#include <vector>
-#include <unordered_map>
-#include <memory>
-#include <optional>
 #include <algorithm>
-#include <queue>
-#include <cstring>
-#include <atomic>
-#include <thread>
-#include <shared_mutex>
-#include <unordered_set>
-#include <limits>
-#include <cstdint>
 #include <cmath>
-#include "../core/types.hpp"
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <queue>
+#include <shared_mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #    include <immintrin.h>
@@ -23,25 +20,27 @@
 #endif
 
 #include "mdbx/mdbx.h"
-#include "../utils/log.hpp"
 #include "../core/types.hpp"
-
+#include "../utils/log.hpp"
+#include "../utils/settings.hpp"
 #include "sparse_vector.hpp"
 
 namespace ndd {
 
     static constexpr ndd::idInt EXHAUSTED_DOC_ID = std::numeric_limits<ndd::idInt>::max();
 
-    /**
-     * ---------- On-disk header for a posting list ----------
-     * Stored at the start of every MDBX value.
-    */
 #pragma pack(push, 1)
     struct PostingListHeader {
-        uint8_t version = 5;       // format version
-        uint32_t nr_entries = 0;   // total number of entries (including tombstones)
-        uint32_t live_count = 0;   // entries with value > 0
-        float max_value = 0.0f;    // largest weight in the list (used for quantization & pruning)
+        uint32_t nr_entries = 0;
+        uint32_t nr_live_entries = 0;
+        float max_value = 0.0f;
+    };
+
+    struct BlockHeader {
+        uint8_t version = 1;
+        uint16_t nr_entries = 0;
+        uint16_t nr_live_entries = 0;
+        float max_value = 0.0f;
     };
 #pragma pack(pop)
 
@@ -53,7 +52,6 @@ namespace ndd {
         PostingListEntry(ndd::idInt id, float val) : doc_id(id), value(val) {}
     };
 
-    // ---------- Min-heap element for top-K collection ----------
     struct ScoredDoc {
         ndd::idInt doc_id;
         float score;
@@ -61,7 +59,7 @@ namespace ndd {
         ScoredDoc(ndd::idInt id, float s) : doc_id(id), score(s) {}
 
         bool operator<(const ScoredDoc& other) const {
-            return score > other.score;  // lowest score on top
+            return score > other.score;
         }
     };
 
@@ -72,14 +70,9 @@ namespace ndd {
 
         bool initialize();
 
-        // Insert or update a batch of documents in the index.
         bool addDocumentsBatch(MDBX_txn* txn,
                                 const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
 
-        /**
-         * Remove a single document from the index by tombstoning its
-         * entries (setting the weight to 0).
-         */
         bool removeDocument(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec);
 
         size_t getTermCount() const;
@@ -90,65 +83,97 @@ namespace ndd {
                                                         const ndd::RoaringBitmap* filter = nullptr);
 
     private:
+        friend class InvertedIndexTestPeer;
+
         MDBX_env* env_;
-        // MDBX database handle: term_id -> posting list bytes
-        MDBX_dbi term_postings_dbi_;
+        MDBX_dbi blocked_term_postings_dbi_;
         size_t vocab_size_;
 
-        // In-memory cache: term_id -> global max weight in that posting list.
-        // Populated at startup by scanning all posting list headers.
-        // Used during search for pruning upper-bound calculations.
         std::unordered_map<uint32_t, float> term_info_;
 
-        mutable std::shared_mutex mutex_;  // readers (search) vs writers (add/remove)
+        mutable std::shared_mutex mutex_;
+
+        using BlockOffset = uint16_t;
+        static constexpr uint32_t kBlockCapacity = std::numeric_limits<BlockOffset>::max();
+        static constexpr uint8_t kOnDiskVersion = 1;
+
+        // Sentinel IDs reserved for metadata rows in blocked_term_postings.
+        static constexpr uint32_t kMetadataTermId = std::numeric_limits<uint32_t>::max();
+        static constexpr uint32_t kMetadataBlockNr = std::numeric_limits<uint32_t>::max();
 
         static inline uint8_t quantize(float val, float max_val);
         static inline float dequantize(uint8_t val, float max_val);
 
-        /**
-         * =====================================================================
-         * PostingListView - zero-copy read into an MDBX page
-         * =====================================================================
-         *
-         * MDBX returns a pointer directly into its memory-mapped page.
-         * We never copy the data; the pointers are valid for the lifetime
-         * of the read transaction.
-         */
-        struct PostingListView {
-            const uint32_t* doc_ids;  // sorted array of document IDs
-            const void* values;       // uint8_t* (quantized) or float* depending on build
-            uint32_t count;           // number of entries
-            uint8_t value_bits;       // 8 = quantized uint8, 32 = raw float
-            float max_value;          // max weight (from header, for dequantization)
+        // Key packing is term_id in high 32 bits and block_nr in low 32 bits.
+        // This keeps all keys for a term contiguous so range scans can seek to
+        // [pack(term, 0), pack(term, UINT32_MAX)] efficiently.
+        static inline uint64_t packPostingKey(uint32_t term_id, uint32_t block_nr) {
+            return (static_cast<uint64_t>(term_id) << 32) | static_cast<uint64_t>(block_nr);
+        }
+
+        static inline uint32_t unpackTermId(uint64_t packed_key) {
+            return static_cast<uint32_t>(packed_key >> 32);
+        }
+
+        static inline uint32_t unpackBlockNr(uint64_t packed_key) {
+            return static_cast<uint32_t>(packed_key & 0xFFFFFFFFULL);
+        }
+
+        static inline uint32_t docToBlockNr(ndd::idInt doc_id) {
+            return static_cast<uint32_t>(doc_id / kBlockCapacity);
+        }
+
+        static inline BlockOffset docToBlockOffset(ndd::idInt doc_id) {
+            return static_cast<BlockOffset>(doc_id % kBlockCapacity);
+        }
+
+        static inline ndd::idInt blockOffsetToDocId(uint32_t block_nr, BlockOffset block_offset) {
+            uint64_t base = static_cast<uint64_t>(block_nr)
+                            * static_cast<uint64_t>(kBlockCapacity);
+            return static_cast<ndd::idInt>(base + static_cast<uint64_t>(block_offset));
+        }
+
+        struct BlockView {
+            const BlockOffset* doc_offsets;
+            const void* values;
+            uint32_t count;
+            uint8_t value_bits;
+            float max_value;
         };
 
-        /**
-         * =====================================================================
-         * PostingListIterator - walks one posting list during search
-         * =====================================================================
-         *
-         * Points into the zero-copy MDBX data. Maintains a cursor
-         * (current_entry_idx / current_doc_id) that advances forward only.
-         * Tombstoned entries (value == 0) are automatically skipped.
-         */
         struct PostingListIterator {
             uint32_t term_id;
-            float term_weight;      // query weight for this term
-            float global_max;       // max stored weight in this posting list
-            const InvertedIndex* index;  // back-pointer for SIMD helper access
+            float term_weight;
+            float global_max;
+            const InvertedIndex* index;
 
-            const uint32_t* doc_ids;  // zero-copy pointer to doc_id array
-            const void* values_ptr;   // zero-copy pointer to values array
-            uint32_t data_size;       // total entry count
-            uint8_t value_bits;       // 8 or 32
-            float max_value;          // for dequantization
+            MDBX_cursor* cursor;
+            uint32_t current_block_nr;
 
-            uint32_t current_entry_idx;  // cursor position in the arrays
-            ndd::idInt current_doc_id;   // doc_id at cursor, or EXHAUSTED_DOC_ID
+            const BlockOffset* doc_offsets;
+            const void* values_ptr;
+            uint32_t data_size;
+            uint8_t value_bits;
+            float max_value;
 
-            // Set up the iterator from a PostingListView and advance to
-            // the first live (non-tombstoned) entry.
-            void init(const PostingListView& view);
+            uint32_t current_entry_idx;
+            ndd::idInt current_doc_id;
+
+            // This is maintained incrementally from posting-list metadata,
+            // so pruning can estimate list length without scanning all blocks.
+            uint32_t remaining_entries;
+
+#ifdef NDD_INV_IDX_PRUNE_DEBUG
+            uint32_t initial_entries;
+            uint32_t pruned_entries;
+#endif
+
+            void init(MDBX_cursor* cursor,
+                    uint32_t term_id,
+                    float term_weight,
+                    float global_max,
+                    uint32_t total_entries,
+                    const InvertedIndex* index);
 
             inline float valueAt(uint32_t idx) const {
                 if (value_bits == 32) {
@@ -168,40 +193,45 @@ namespace ndd {
                 return valueAt(current_entry_idx);
             }
 
-            // Skip tombstoned entries starting at current_entry_idx.
-            // Updates current_doc_id to the next live doc, or EXHAUSTED_DOC_ID.
             void advanceToNextLive();
-
-            // Move to the next live entry after the current one.
             void next();
-
-            // Skip forward to the first live entry with doc_id >= target.
-            // Uses SIMD binary search over the sorted doc_id array.
             void advance(ndd::idInt target_doc_id);
 
-            // Upper bound on the score any remaining entry can contribute.
-            // Used by the pruning step: if this is below the K-th best
-            // score, we can skip ahead safely.
             float upperBound() const {
                 return global_max * term_weight;
             }
 
             uint32_t remainingEntries() const {
                 if (current_doc_id == EXHAUSTED_DOC_ID) return 0;
-                return data_size - current_entry_idx;
+                return remaining_entries;
+            }
+
+            bool loadNextBlock();
+            bool loadFirstBlock();
+            bool parseCurrentKV(const MDBX_val& key, const MDBX_val& data);
+
+            inline void consumeEntries(uint32_t count) {
+                if (count >= remaining_entries) {
+                    remaining_entries = 0;
+                } else {
+                    remaining_entries -= count;
+                }
+            }
+
+            inline ndd::idInt currentBlockBaseDocId() const {
+                return blockOffsetToDocId(current_block_nr, 0);
+            }
+
+            inline ndd::idInt docIdAt(uint32_t idx) const {
+                return blockOffsetToDocId(current_block_nr, doc_offsets[idx]);
             }
 
         private:
-            // Expose dequantize to iterator inline methods
             static inline float dequantize(uint8_t val, float max_val) {
                 if (max_val <= settings::NEAR_ZERO) return 0.0f;
                 return (float)val * (max_val / UINT8_MAX);
             }
         };
-
-        // =====================================================================
-        // SIMD helpers
-        // =====================================================================
 
         size_t findDocIdSIMD(const uint32_t* doc_ids,
                                 size_t size,
@@ -212,33 +242,47 @@ namespace ndd {
                                 size_t size,
                                 size_t start_idx) const;
 
-        // =====================================================================
-        // MDBX storage methods
-        // =====================================================================
+        PostingListHeader readPostingListHeader(MDBX_txn* txn,
+                                                uint32_t term_id,
+                                                bool* out_found = nullptr) const;
 
-        PostingListView getReadOnlyPostingList(MDBX_txn* txn, uint32_t term_id) const;
+        bool writePostingListHeader(MDBX_txn* txn,
+                                    uint32_t term_id,
+                                    const PostingListHeader& header);
 
-        std::vector<PostingListEntry> loadPostingList(MDBX_txn* txn, uint32_t term_id,
-                                                        uint32_t* out_live_count = nullptr,
-                                                        float* out_max_value = nullptr) const;
+        bool deletePostingListHeader(MDBX_txn* txn, uint32_t term_id);
 
-        bool savePostingList(MDBX_txn* txn,
+        bool loadBlockEntries(MDBX_txn* txn,
                             uint32_t term_id,
+                            uint32_t block_nr,
+                            std::vector<PostingListEntry>* entries,
+                            uint32_t* out_live_count,
+                            float* out_max_value,
+                            bool* out_found) const;
+
+        bool saveBlockEntries(MDBX_txn* txn,
+                            uint32_t term_id,
+                            uint32_t block_nr,
                             const std::vector<PostingListEntry>& entries,
                             uint32_t live_count,
                             float max_val);
 
-        bool deletePostingList(MDBX_txn* txn, uint32_t term_id);
+        bool deleteBlock(MDBX_txn* txn, uint32_t term_id, uint32_t block_nr);
 
-        // =====================================================================
-        // Startup
-        // =====================================================================
+        bool parseBlockViewFromValue(const MDBX_val& data,
+                                    uint32_t block_nr,
+                                    BlockView* out_view) const;
+
+        bool iterateTermBlocks(
+            MDBX_txn* txn,
+            uint32_t term_id,
+            const std::function<bool(uint32_t block_nr, const MDBX_val& data)>& callback) const;
+
+        float recomputeGlobalMaxFromBlocks(MDBX_txn* txn, uint32_t term_id) const;
+
+        bool deleteAllBlocksForTerm(MDBX_txn* txn, uint32_t term_id);
 
         bool loadTermInfo();
-
-        // =====================================================================
-        // Add / remove internals
-        // =====================================================================
 
         bool addDocumentsBatchInternal(
             MDBX_txn* txn,
@@ -248,11 +292,10 @@ namespace ndd {
                                     ndd::idInt doc_id,
                                     const SparseVector& vec);
 
-        // =====================================================================
-        // Pruning
-        // =====================================================================
-
         void pruneLongest(std::vector<PostingListIterator*>& iters, float min_score);
     };
+
+    void printSparseSearchDebugStats();
+    void printSparseUpdateDebugStats();
 
 }  // namespace ndd

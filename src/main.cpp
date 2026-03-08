@@ -31,6 +31,8 @@
 
 // local includes
 #include "settings.hpp"
+#include "mdbx/mdbx.h"
+#include "sparse/inverted_index.hpp"
 #include "core/ndd.hpp"
 #include "auth.hpp"
 #include "quant/common.hpp"
@@ -235,6 +237,10 @@ int main(int argc, char** argv) {
         crow::json::wvalue response(
                 {{"status", "ok"},
                  {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}});
+        PRINT_LOG_TIME();
+        ndd::printSparseSearchDebugStats();
+        ndd::printSparseUpdateDebugStats();
+        print_mdbx_stats();
         return crow::response(200, response.dump());
     });
 
