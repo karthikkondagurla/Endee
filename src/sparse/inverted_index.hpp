@@ -262,6 +262,14 @@ namespace ndd {
                                 size_t size,
                                 size_t start_idx) const;
 
+        template <bool StoreFloats>
+        static bool accumulateBatchScores(PostingListIterator* it,
+                                          ndd::idInt batch_start,
+                                          uint32_t batch_end_block_nr,
+                                          BlockOffset batch_end_block_offset,
+                                          float* scores_buf,
+                                          float term_weight);
+
         PostingListHeader readPostingListHeader(MDBX_txn* txn,
                                                 uint32_t term_id,
                                                 bool* out_found = nullptr) const;

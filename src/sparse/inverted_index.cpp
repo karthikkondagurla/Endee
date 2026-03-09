@@ -21,6 +21,27 @@
 namespace ndd {
 
     namespace {
+        template <bool StoreFloats>
+        struct PostingValueAccessor;
+
+        template <>
+        struct PostingValueAccessor<true> {
+            using ValueType = float;
+
+            static inline bool isLive(ValueType value) {
+                return value > 0.0f;
+            }
+        };
+
+        template <>
+        struct PostingValueAccessor<false> {
+            using ValueType = uint8_t;
+
+            static inline bool isLive(ValueType value) {
+                return value > 0;
+            }
+        };
+
 #ifdef ND_SPARSE_INSTRUMENT
         using SteadyClock = std::chrono::steady_clock;
 
@@ -31,8 +52,8 @@ namespace ndd {
         }
 
         struct SparseSearchDebugStats {
-            std::atomic<uint64_t> phase3_iterators_visited{0};
-            std::atomic<uint64_t> phase3_iterators_contributed{0};
+            std::atomic<uint64_t> phase2_iterators_visited{0};
+            std::atomic<uint64_t> phase2_iterators_contributed{0};
             std::atomic<uint64_t> parse_current_kv_calls{0};
             std::atomic<uint64_t> parse_current_kv_total_ns{0};
         };
@@ -92,9 +113,9 @@ namespace ndd {
 #ifdef ND_SPARSE_INSTRUMENT
     void printSparseSearchDebugStats() {
         SparseSearchDebugStats& stats = sparseSearchDebugStats();
-        const uint64_t visited = stats.phase3_iterators_visited.exchange(0, std::memory_order_relaxed);
+        const uint64_t visited = stats.phase2_iterators_visited.exchange(0, std::memory_order_relaxed);
         const uint64_t contributed =
-                stats.phase3_iterators_contributed.exchange(0, std::memory_order_relaxed);
+                stats.phase2_iterators_contributed.exchange(0, std::memory_order_relaxed);
         const uint64_t parse_calls = stats.parse_current_kv_calls.exchange(0, std::memory_order_relaxed);
         const uint64_t parse_total_ns =
                 stats.parse_current_kv_total_ns.exchange(0, std::memory_order_relaxed);
@@ -310,6 +331,77 @@ namespace ndd {
         return vocab_size_;
     }
 
+    template <bool StoreFloats>
+    bool InvertedIndex::accumulateBatchScores(PostingListIterator* it,
+                                                ndd::idInt batch_start,
+                                                uint32_t batch_end_block_nr,
+                                                BlockOffset batch_end_block_offset,
+                                                float* scores_buf,
+                                                float term_weight)
+    {
+        using Accessor = PostingValueAccessor<StoreFloats>;
+        using ValueType = typename Accessor::ValueType;
+
+        const BlockOffset* offsets = it->doc_offsets;
+        const ValueType* vals = static_cast<const ValueType*>(it->values_ptr);
+        uint32_t idx = it->current_entry_idx;
+        uint32_t sz = it->data_size;
+        float block_max_value = it->max_value;
+        bool contributed = false;
+
+        while (true) {
+            if (it->current_block_nr > batch_end_block_nr) {
+                break;
+            }
+
+            const bool consume_full_block = it->current_block_nr < batch_end_block_nr;
+            const int64_t local_base =
+                    static_cast<int64_t>(it->currentBlockBaseDocId()) - static_cast<int64_t>(batch_start);
+            const uint32_t before = idx;
+            while (idx < sz && (consume_full_block || offsets[idx] <= batch_end_block_offset)) {
+                const ValueType value = vals[idx];
+                if (Accessor::isLive(value)) {
+                    const size_t local = static_cast<size_t>(local_base + offsets[idx]);
+                    if constexpr (StoreFloats) {
+                        scores_buf[local] += value * term_weight;
+                    } else {
+                        scores_buf[local] += InvertedIndex::dequantize(value, block_max_value) * term_weight;
+                    }
+                    contributed = true;
+                }
+                idx++;
+            }
+            it->consumeEntries(idx - before);
+
+            if (idx < sz) {
+                break;
+            }
+
+            it->current_entry_idx = idx;
+            if (!it->loadNextBlock()) {
+                break;
+            }
+
+            offsets = it->doc_offsets;
+            vals = static_cast<const ValueType*>(it->values_ptr);
+            block_max_value = it->max_value;
+            idx = 0;
+            sz = it->data_size;
+
+            if (it->current_block_nr > batch_end_block_nr
+                || (it->current_block_nr == batch_end_block_nr
+                && sz > 0
+                && offsets[0] > batch_end_block_offset))
+            {
+                break;
+            }
+        }
+
+        it->current_entry_idx = idx;
+        it->advanceToNextLive();
+        return contributed;
+    }
+
     std::vector<std::pair<ndd::idInt, float>>
     InvertedIndex::search(const SparseVector& query,
                         size_t k,
@@ -390,6 +482,8 @@ namespace ndd {
             mdbx_txn_abort(txn);
             return {};
         }
+
+        //END OF PHASE 1
         }
         
 
@@ -431,123 +525,48 @@ namespace ndd {
             std::memset(scores_buf.data(), 0, batch_len * sizeof(float));
 
             {
-            LOG_TIME("search phase 3");
+            LOG_TIME("search phase 2");
             // Consume all postings that fall into this batch. The iterator keeps absolute doc_ids
             // implicit as (current_block_nr, doc_offsets[idx]) to avoid rebuilding them eagerly.
             for (size_t i = 0; i < iters.size(); i++) {
                 PostingListIterator* it = iters[i];
 #ifdef ND_SPARSE_INSTRUMENT
-                sparseSearchDebugStats().phase3_iterators_visited.fetch_add(1, std::memory_order_relaxed);
-                bool phase3_contributed = false;
+                sparseSearchDebugStats().phase2_iterators_visited.fetch_add(1, std::memory_order_relaxed);
 #endif // ND_SPARSE_INSTRUMENT
                 if (it->current_doc_id > batch_end) {
                     continue;
                 }
-                float qw = it->term_weight;
-
-                const BlockOffset* offsets = it->doc_offsets;
-                uint32_t idx = it->current_entry_idx;
-                uint32_t sz  = it->data_size;
-
+                [[maybe_unused]] const bool phase3_contributed =
 #if defined(NDD_INV_IDX_STORE_FLOATS)
-                const float* vals = (const float*)it->values_ptr;
-                while (true) {
-                    if (it->current_block_nr > batch_end_block_nr) {
-                        break;
-                    }
-
-                    const bool consume_full_block = it->current_block_nr < batch_end_block_nr;
-                    const int64_t local_base =
-                            static_cast<int64_t>(it->currentBlockBaseDocId()) - static_cast<int64_t>(batch_start);
-                    uint32_t before = idx;
-                    while (idx < sz
-                          && (consume_full_block || offsets[idx] <= batch_end_block_offset)) {
-                        if (vals[idx] > 0.0f) {
-                            size_t local = static_cast<size_t>(local_base + offsets[idx]);
-                            scores_buf[local] += vals[idx] * qw;
-#ifdef ND_SPARSE_INSTRUMENT
-                            phase3_contributed = true;
-#endif // ND_SPARSE_INSTRUMENT
-                        }
-                        idx++;
-                    }
-                    it->consumeEntries(idx - before);
-
-                    if (idx < sz) break;
-
-                    it->current_entry_idx = idx;
-                    if (!it->loadNextBlock()) break;
-
-                    offsets = it->doc_offsets;
-                    vals = (const float*)it->values_ptr;
-                    idx = 0;
-                    sz = it->data_size;
-
-                    if (it->current_block_nr > batch_end_block_nr
-                       || (it->current_block_nr == batch_end_block_nr
-                          && sz > 0
-                          && offsets[0] > batch_end_block_offset)) {
-                        break;
-                    }
-                }
+                        accumulateBatchScores<true>(
+                                it,
+                                batch_start,
+                                batch_end_block_nr,
+                                batch_end_block_offset,
+                                scores_buf.data(),
+                                it->term_weight);
 #else
-                const uint8_t* vals = (const uint8_t*)it->values_ptr;
-                float scale = it->max_value / UINT8_MAX;
-                while (true) {
-                    if (it->current_block_nr > batch_end_block_nr) {
-                        break;
-                    }
-
-                    const bool consume_full_block = it->current_block_nr < batch_end_block_nr;
-                    const int64_t local_base =
-                            static_cast<int64_t>(it->currentBlockBaseDocId()) - static_cast<int64_t>(batch_start);
-                    uint32_t before = idx;
-                    while (idx < sz
-                          && (consume_full_block || offsets[idx] <= batch_end_block_offset)) {
-                        if (vals[idx] > 0) {
-                            size_t local = static_cast<size_t>(local_base + offsets[idx]);
-                            scores_buf[local] += ((float)vals[idx] * scale) * qw;
-#ifdef ND_SPARSE_INSTRUMENT
-                            phase3_contributed = true;
-#endif // ND_SPARSE_INSTRUMENT
-                        }
-                        idx++;
-                    }
-                    it->consumeEntries(idx - before);
-
-                    if (idx < sz) break;
-
-                    it->current_entry_idx = idx;
-                    if (!it->loadNextBlock()) break;
-
-                    offsets = it->doc_offsets;
-                    vals = (const uint8_t*)it->values_ptr;
-                    scale = it->max_value / UINT8_MAX;
-                    idx = 0;
-                    sz = it->data_size;
-
-                    if (it->current_block_nr > batch_end_block_nr
-                       || (it->current_block_nr == batch_end_block_nr
-                          && sz > 0
-                          && offsets[0] > batch_end_block_offset)) {
-                        break;
-                    }
-                }
+                        accumulateBatchScores<false>(
+                                it,
+                                batch_start,
+                                batch_end_block_nr,
+                                batch_end_block_offset,
+                                scores_buf.data(),
+                                it->term_weight);
 #endif // NDD_INV_IDX_STORE_FLOATS
 
-                it->current_entry_idx = idx;
-                it->advanceToNextLive();
 #ifdef ND_SPARSE_INSTRUMENT
                 if (phase3_contributed) {
-                    sparseSearchDebugStats().phase3_iterators_contributed.fetch_add(
+                    sparseSearchDebugStats().phase2_iterators_contributed.fetch_add(
                             1, std::memory_order_relaxed);
                 }
 #endif // ND_SPARSE_INSTRUMENT
             }
+            //END OF SEARCH PHASE 2
             }
 
             {
-                LOG_TIME("search phase 4");
+                LOG_TIME("search phase 3");
             // Only scores inside the current batch can be non-zero, so convert that temporary
             // dense buffer into top-k candidates before moving to the next window.
             for (size_t local = 0; local < batch_len; local++) {
@@ -568,10 +587,11 @@ namespace ndd {
                     threshold = top_results.top().score;
                 }
             }
+            //END OF SEARCH PHASE 3
             }
 
             {
-                LOG_TIME("search phase 5");
+                LOG_TIME("search phase 4");
             // Compact away exhausted iterators, then optionally prune the longest remaining list
             // when its best possible future contribution cannot beat the current threshold.
             size_t write_idx = 0;
@@ -593,6 +613,7 @@ namespace ndd {
                     min_id = minIterDocId();
                 }
             }
+            //END OF SEARCH PHASE 4
             }
         }
 
