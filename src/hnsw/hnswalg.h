@@ -606,7 +606,7 @@ namespace hnswlib {
 
             // Initialize level 0 links
             // TODO - check if it is required
-            {
+            if constexpr(is_new) {
                 char* linklist = get_linklist0(cur_c);
                 memset(linklist, 0, sizeLinksBaseLayer_);
             }
@@ -617,17 +617,21 @@ namespace hnswlib {
 
                 total_size = data_size_ + sizeof(levelInt) + curLevel * sizeLinksUpperLayers_;
 
-                auto mem = std::make_unique<uint8_t[]>(total_size);
+                if constexpr(is_new) {
+                    auto mem = std::make_unique<uint8_t[]>(total_size);
 
-                                // copy vector
-                                memcpy(mem.get(), datapoint, data_size_);
-                                memcpy(mem.get() + data_size_, &curLevel, sizeof(levelInt));
-                // zero initialize linklists
-                                memset(mem.get() + data_size_ + sizeof(levelInt),
-                       0,
-                       curLevel * sizeLinksUpperLayers_);
+                    memcpy(mem.get(), datapoint, data_size_);
+                    memcpy(mem.get() + data_size_, &curLevel, sizeof(levelInt));
+                    memset(mem.get() + data_size_ + sizeof(levelInt),
+                           0,
+                           curLevel * sizeLinksUpperLayers_);
 
-                dataUpperLayer_[cur_c] = std::move(mem);
+                    dataUpperLayer_[cur_c] = std::move(mem);
+                } else {
+                    uint8_t* upper_mem = dataUpperLayer_[cur_c].get();
+                    memcpy(upper_mem, datapoint, data_size_);
+                    memcpy(upper_mem + data_size_, &curLevel, sizeof(levelInt));
+                }
             }
 
             if(cur_c != 0) {
@@ -1279,11 +1283,12 @@ namespace hnswlib {
                 idhInt* ll_cur = reinterpret_cast<idhInt*>(level == 0 ? get_linklist0(cur_c)
                                                                       : get_linklist(cur_c, level));
                 if(ll_cur) {
-                    setListCount(ll_cur, selected.size());
                     idhInt* data = (ll_cur + 1);
                     for(size_t idx = 0; idx < selected.size(); idx++) {
                         data[idx] = selected[idx].second;
                     }
+                    std::atomic_thread_fence(std::memory_order_release);
+                    setListCount(ll_cur, selected.size());
                 }
             }
 
@@ -1406,6 +1411,9 @@ namespace hnswlib {
             dist_t lowerBound = std::numeric_limits<dist_t>::lowest();
 
             for (idhInt ep_id : ep_ids) {
+                if(ep_id >= maxElements_) {
+                    continue;
+                }
                 if (visited_array[ep_id] == visited_array_tag) {
                     continue;
                 }
@@ -1490,6 +1498,10 @@ namespace hnswlib {
             while(!candidate_set.empty()) {
                 auto current_pair = candidate_set.top();
                 idhInt current_id = current_pair.second;
+                if(current_id >= maxElements_) {
+                    candidate_set.pop();
+                    continue;
+                }
                 // Early exit if we have enough candidates
                 if(current_pair.first < lowerBound && top_candidates.size() >= ef) {
                     below_threshold_count++;
@@ -1501,6 +1513,12 @@ namespace hnswlib {
                 }
 
                 candidate_set.pop();
+
+                if(layer != 0) {
+                    if(getUpperLayerDataPtr(current_id) == nullptr) {
+                        continue;
+                    }
+                }
 
                 // Get neighbors
                 idhInt* data = (layer == 0) ? (idhInt*)get_linklist0(current_id)
@@ -1519,6 +1537,7 @@ namespace hnswlib {
                     valid_ids.reserve(size);
                     for(idhInt j = 0; j < size; j++) {
                         idhInt candidate_id = *(datal + j);
+                        if(candidate_id >= maxElements_) continue;
                         if(visited_array[candidate_id] == visited_array_tag) continue;
                         visited_array[candidate_id] = visited_array_tag;
                         if(has_deletions && isMarkedDeleted(candidate_id)) continue;
@@ -1610,6 +1629,7 @@ namespace hnswlib {
                     // --- Upper layer path: data is in-memory, no batching needed ---
                     for(idhInt j = 0; j < size; j++) {
                         idhInt candidate_id = *(datal + j);
+                        if(candidate_id >= maxElements_) continue;
                         if(visited_array[candidate_id] == visited_array_tag) continue;
                         visited_array[candidate_id] = visited_array_tag;
                         if(has_deletions && isMarkedDeleted(candidate_id)) continue;
