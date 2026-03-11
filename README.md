@@ -7,9 +7,13 @@
 </p>
 
 <p align="center">
+    <b>Next Generation Vector Database For Scalable High-Performance AI</b>
+</p>
+
+<p align="center">
     <a href="https://docs.endee.io/quick-start"><img src="https://img.shields.io/badge/Docs-Quick_Start-success?style=flat-square" alt="Docs"></a>
     <a href="https://github.com/endee-io/endee/blob/master/LICENSE"><img src="https://img.shields.io/github/license/endee-io/endee?style=flat-square" alt="License"></a>
-    <a href="mailto:enterprise@endee.io"><img src="https://img.shields.io/badge/Chat-Contact_Us-0A66C2?style=flat-square" alt="Chat"></a>
+    <a href="https://discord.gg/5HFGqDZQE3"><img src="https://img.shields.io/badge/Discord-Join_Chat-5865F2?logo=discord&style=flat-square" alt="Discord"></a>
     <a href="https://endee.io/"><img src="https://img.shields.io/badge/Website-Endee-111111?style=flat-square" alt="Website"></a>
     <!-- <a href="https://github.com/endee-io/endee/actions"><img src="https://img.shields.io/github/actions/workflow/status/endee-io/endee/ci.yml?style=flat-square" alt="Tests status"></a> -->
     <!-- <a href="https://github.com/endee-io/endee/releases"><img src="https://img.shields.io/github/v/release/endee-io/endee?style=flat-square" alt="Latest release"></a> -->
