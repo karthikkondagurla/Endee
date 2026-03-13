@@ -114,6 +114,11 @@ private:
         std::lock_guard<std::mutex> lock(schema_mutex_);
         auto it = schema_cache_.find(field);
         if(it != schema_cache_.end()) {
+            if(it->second != type) {
+                LOG_WARN(1222, index_id_, "Schema type conflict for field '" << field
+                    << "': expected=" << static_cast<int>(it->second)
+                    << ", got=" << static_cast<int>(type));
+            }
             return it->second == type;
         }
 
@@ -176,6 +181,167 @@ private:
         return field + ":" + value;
     }
 
+    /**
+     * Converts JSON numeric value to sortable uint32_t representation.
+     * Handles both integers and floats.
+     * @throws runtime_error if value is not a number
+     */
+    uint32_t json_to_sortable_numeric(const nlohmann::json& val) const {
+        if(val.is_number_integer()) {
+            return ndd::filter::int_to_sortable(val.get<int>());
+        } else if(val.is_number()) {
+            return ndd::filter::float_to_sortable(val.get<float>());
+        } else {
+            throw std::runtime_error("Value must be a number");
+        }
+    }
+
+    /**
+     * Process $eq (equality) operator for a field.
+     * Handles both numeric and category fields.
+     */
+    ndd::RoaringBitmap process_eq_operator(
+        const std::string& field,
+        const nlohmann::json& val,
+        FieldType type) const {
+
+        if(type == FieldType::Number) {
+            uint32_t sortable_val = json_to_sortable_numeric(val);
+            return numeric_index_->range(field, sortable_val, sortable_val);
+        } else {
+            // Category/boolean handling
+            if(!val.is_string() && !val.is_number_integer() && !val.is_boolean()) {
+                throw std::runtime_error("$eq value must be string, integer or boolean");
+            }
+            std::string str_val;
+            if(val.is_string()) {
+                str_val = val.get<std::string>();
+            } else if(val.is_boolean()) {
+                str_val = val.get<bool>() ? "1" : "0";
+            } else {
+                str_val = std::to_string(val.get<int>());
+                if (str_val.size() > 255) throw std::runtime_error("Category value too long");
+            }
+            std::string key = format_filter_key(field, str_val);
+            return category_index_->get_bitmap_by_key(key);
+        }
+    }
+
+    /**
+     * Process $in (set membership) operator for a field.
+     * Returns union of all matching values.
+     */
+    ndd::RoaringBitmap process_in_operator(
+        const std::string& field,
+        const nlohmann::json& val,
+        FieldType type) const {
+
+        if(!val.is_array()) {
+            throw std::runtime_error("$in must be array");
+        }
+
+        ndd::RoaringBitmap result;
+
+        if(val.empty()) {
+            LOG_DEBUG("Empty $in array for field: " << field);
+            return result;
+        }
+
+        for(const auto& v : val) {
+            if(type == FieldType::Number) {
+                uint32_t sortable_val = json_to_sortable_numeric(v);
+                result |= numeric_index_->range(field, sortable_val, sortable_val);
+            } else {
+                if(!v.is_string() && !v.is_number_integer() && !v.is_boolean()) {
+                    throw std::runtime_error("$in values must be string, integer or boolean");
+                }
+                std::string str_val;
+                if(v.is_string()) {
+                    str_val = v.get<std::string>();
+                } else if(v.is_boolean()) {
+                    str_val = v.get<bool>() ? "1" : "0";
+                } else {
+                    str_val = std::to_string(v.get<int>());
+                }
+                if(!str_val.empty()) {
+                    if (str_val.size() > 255) throw std::runtime_error("Category value too long");
+                    std::string key = format_filter_key(field, str_val);
+                    result |= category_index_->get_bitmap_by_key(key);
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Process $range (inclusive range) operator for numeric fields.
+     * Format: [start, end] - both inclusive.
+     */
+    ndd::RoaringBitmap process_range_operator(
+        const std::string& field,
+        const nlohmann::json& val,
+        FieldType type) const {
+
+        if(!val.is_array() || val.size() != 2) {
+            throw std::runtime_error("$range must be [start, end] array with exactly 2 elements");
+        }
+
+        if(type != FieldType::Number) {
+            throw std::runtime_error("$range operator is only supported for numeric fields");
+        }
+
+        uint32_t start_val = json_to_sortable_numeric(val[0]);
+        uint32_t end_val = json_to_sortable_numeric(val[1]);
+
+        if(start_val > end_val) {
+            throw std::runtime_error("Invalid range: start > end");
+        }
+
+        return numeric_index_->range(field, start_val, end_val);
+    }
+
+    /**
+     * Process comparison operators: $gt, $gte, $lt, $lte.
+     * All implemented as range queries with appropriate bounds.
+     */
+    ndd::RoaringBitmap process_comparison_operator(
+        const std::string& field,
+        const nlohmann::json& val,
+        FieldType type,
+        const std::string& op) const {
+
+        if(type != FieldType::Number) {
+            throw std::runtime_error(op + " operator is only supported for numeric fields");
+        }
+
+        uint32_t sortable_val = json_to_sortable_numeric(val);
+
+        if(op == "$gt") {
+            // Greater than (exclusive): (value, MAX]
+            if(sortable_val == UINT32_MAX) {
+                return ndd::RoaringBitmap(); // No values > MAX
+            }
+            return numeric_index_->range(field, sortable_val + 1, UINT32_MAX);
+
+        } else if(op == "$gte") {
+            // Greater than or equal (inclusive): [value, MAX]
+            return numeric_index_->range(field, sortable_val, UINT32_MAX);
+
+        } else if(op == "$lt") {
+            // Less than (exclusive): [0, value)
+            if(sortable_val == 0) {
+                return ndd::RoaringBitmap(); // No values < 0
+            }
+            return numeric_index_->range(field, 0, sortable_val - 1);
+
+        } else if(op == "$lte") {
+            // Less than or equal (inclusive): [0, value]
+            return numeric_index_->range(field, 0, sortable_val);
+        }
+
+        throw std::runtime_error("Unsupported comparison operator: " + op);
+    }
+
 public:
     Filter(const std::string& path, const std::string& index_id) :
         index_id_(index_id),
@@ -189,7 +355,19 @@ public:
         mdbx_env_close(env_);
     }
 
-    // Compute the filter bitmap based on the provided JSON filter array
+    /**
+     * Computes a RoaringBitmap of IDs matching all filter conditions using AND semantics.
+     *
+     * Filter format: array of conditions, e.g.:
+     *   [{"field1": {"$eq": "value"}}, {"field2": {"$gt": 10}}]
+     *
+     * Each condition is evaluated independently to produce a bitmap, then all bitmaps
+     * are intersected (AND) to get the final result. 
+     *
+     * Optimization: Conditions are sorted by cardinality (smallest first) before
+     * intersection to minimize work on subsequent AND operations.
+     */
+
     ndd::RoaringBitmap computeFilterBitmap(const nlohmann::json& filter_array) const {
         if(!filter_array.is_array()) {
             throw std::runtime_error("Filter must be an array");
@@ -234,197 +412,27 @@ public:
             const std::string op = expr.begin().key();
             const auto& val = expr.begin().value();
 
-            if(op == "$eq") {
-                if(type == FieldType::Number) {
-                    uint32_t sortable_val;
-                    if(val.is_number_integer()) {
-                        sortable_val = ndd::filter::int_to_sortable(val.get<int>());
-                    } else if(val.is_number()) {
-                        sortable_val = ndd::filter::float_to_sortable(val.get<float>());
-                    } else {
-                        throw std::runtime_error("$eq value for numeric field must be a number");
-                    }
-                    or_result = numeric_index_->range(field, sortable_val, sortable_val);
+            LOG_INFO(1215, index_id_, "Processing operator " << op << " for field '" << field << "'");
+
+            // Dispatch to operator-specific helper functions
+            try {
+                if(op == "$eq") {
+                    or_result = process_eq_operator(field, val, type);
+                } else if(op == "$in") {
+                    or_result = process_in_operator(field, val, type);
+                } else if(op == "$range") {
+                    or_result = process_range_operator(field, val, type);
+                } else if(op == "$gt" || op == "$gte" || op == "$lt" || op == "$lte") {
+                    or_result = process_comparison_operator(field, val, type, op);
                 } else {
-                    if(!val.is_string() && !val.is_number_integer() && !val.is_boolean()) {
-                        throw std::runtime_error("$eq value must be string, integer or boolean");
-                    }
-                    std::string str_val;
-                    if(val.is_string()) {
-                        str_val = val.get<std::string>();
-                    } else if(val.is_boolean()) {
-                        str_val = val.get<bool>() ? "1" : "0";
-                    } else {
-                        str_val = std::to_string(val.get<int>());
-                        if (str_val.size() > 255) throw std::runtime_error("Category value too long");
-                    }
-                    std::string key = format_filter_key(field, str_val);
-                    or_result = category_index_->get_bitmap_by_key(key);
+                    LOG_ERROR(1217, index_id_, "Unsupported operator: " << op << " for field '" << field << "'");
+                    throw std::runtime_error("Unsupported operator: " + op);
                 }
-            } else if(op == "$in") {
-                if(!val.is_array()) {
-                    throw std::runtime_error("$in must be array");
-                }
-                if(val.empty()) {
-                    LOG_DEBUG("Empty $in array for field: " << field);
-                } else {
-                    for(const auto& v : val) {
-                        if(type == FieldType::Number) {
-                            uint32_t sortable_val;
-                            if(v.is_number_integer()) {
-                                sortable_val = ndd::filter::int_to_sortable(v.get<int>());
-                            } else if(v.is_number()) {
-                                sortable_val = ndd::filter::float_to_sortable(v.get<float>());
-                            } else {
-                                throw std::runtime_error(
-                                        "$in value for numeric field must be a number");
-                            }
-                            or_result |= numeric_index_->range(field, sortable_val, sortable_val);
-                        } else {
-                            if(!v.is_string() && !v.is_number_integer() && !v.is_boolean()) {
-                                throw std::runtime_error(
-                                        "$in values must be string, integer or boolean");
-                            }
-                            std::string str_val;
-                            if(v.is_string()) {
-                                str_val = v.get<std::string>();
-                            } else if(v.is_boolean()) {
-                                str_val = v.get<bool>() ? "1" : "0";
-                            } else {
-                                str_val = std::to_string(v.get<int>());
-                            }
-                            if(!str_val.empty()) {
-                                if (str_val.size() > 255) throw std::runtime_error("Category value too long");
-                                std::string key = format_filter_key(field, str_val);
-                                or_result |= category_index_->get_bitmap_by_key(key);
-                            }
-                        }
-                    }
-                }
-            } else if(op == "$range") {
-                if(!val.is_array() || val.size() != 2) {
-                    throw std::runtime_error(
-                            "$range must be [start, end] array with exactly 2 elements");
-                }
-
-                if(type == FieldType::Number) {
-                    uint32_t start_val, end_val;
-
-                    if(val[0].is_number_integer()) {
-                        start_val = ndd::filter::int_to_sortable(val[0].get<int>());
-                    } else if(val[0].is_number()) {
-                        start_val = ndd::filter::float_to_sortable(val[0].get<float>());
-                    } else {
-                        throw std::runtime_error("Range start must be a number");
-                    }
-
-                    if(val[1].is_number_integer()) {
-                        end_val = ndd::filter::int_to_sortable(val[1].get<int>());
-                    } else if(val[1].is_number()) {
-                        end_val = ndd::filter::float_to_sortable(val[1].get<float>());
-                    } else {
-                        throw std::runtime_error("Range end must be a number");
-                    }
-
-                    if(start_val > end_val) {
-                        throw std::runtime_error("Invalid range: start > end");
-                    }
-
-                    or_result = numeric_index_->range(field, start_val, end_val);
-                } else {
-                    throw std::runtime_error(
-                            "$range operator is only supported for numeric fields");
-                }
-            } else if(op == "$gt") {
-                // Greater than (exclusive): value > N
-                if(type != FieldType::Number) {
-                    throw std::runtime_error(
-                            "$gt operator is only supported for numeric fields");
-                }
-
-                uint32_t sortable_val;
-                if(val.is_number_integer()) {
-                    sortable_val = ndd::filter::int_to_sortable(val.get<int>());
-                } else if(val.is_number()) {
-                    sortable_val = ndd::filter::float_to_sortable(val.get<float>());
-                } else {
-                    throw std::runtime_error("$gt value must be a number");
-                }
-
-                // Handle edge case: if value is maximum, no values can be greater
-                if(sortable_val == UINT32_MAX) {
-                    or_result = ndd::RoaringBitmap(); // empty bitmap
-                } else {
-                    // Greater than is implemented as range [value+1, MAX]
-                    or_result = numeric_index_->range(field, sortable_val + 1, UINT32_MAX);
-                }
-
-            } else if(op == "$gte") {
-                // Greater than or equal (inclusive): value >= N
-                if(type != FieldType::Number) {
-                    throw std::runtime_error(
-                            "$gte operator is only supported for numeric fields");
-                }
-
-                uint32_t sortable_val;
-                if(val.is_number_integer()) {
-                    sortable_val = ndd::filter::int_to_sortable(val.get<int>());
-                } else if(val.is_number()) {
-                    sortable_val = ndd::filter::float_to_sortable(val.get<float>());
-                } else {
-                    throw std::runtime_error("$gte value must be a number");
-                }
-
-                // Greater than or equal is implemented as range [value, MAX]
-                or_result = numeric_index_->range(field, sortable_val, UINT32_MAX);
-
-            } else if(op == "$lt") {
-                // Less than (exclusive): value < N
-                if(type != FieldType::Number) {
-                    throw std::runtime_error(
-                            "$lt operator is only supported for numeric fields");
-                }
-
-                uint32_t sortable_val;
-                if(val.is_number_integer()) {
-                    sortable_val = ndd::filter::int_to_sortable(val.get<int>());
-                } else if(val.is_number()) {
-                    sortable_val = ndd::filter::float_to_sortable(val.get<float>());
-                } else {
-                    throw std::runtime_error("$lt value must be a number");
-                }
-
-                // Handle edge case: if value is minimum, no values can be less
-                if(sortable_val == 0) {
-                    or_result = ndd::RoaringBitmap(); // empty bitmap
-                } else {
-                    // Less than is implemented as range [0, value-1]
-                    or_result = numeric_index_->range(field, 0, sortable_val - 1);
-                }
-
-            } else if(op == "$lte") {
-                // Less than or equal (inclusive): value <= N
-                if(type != FieldType::Number) {
-                    throw std::runtime_error(
-                            "$lte operator is only supported for numeric fields");
-                }
-
-                uint32_t sortable_val;
-                if(val.is_number_integer()) {
-                    sortable_val = ndd::filter::int_to_sortable(val.get<int>());
-                } else if(val.is_number()) {
-                    sortable_val = ndd::filter::float_to_sortable(val.get<float>());
-                } else {
-                    throw std::runtime_error("$lte value must be a number");
-                }
-
-                // Less than or equal is implemented as range [0, value]
-                or_result = numeric_index_->range(field, 0, sortable_val);
-
-            } else {
-                throw std::runtime_error("Unsupported operator: " + op);
+            } catch(const std::exception& e) {
+                LOG_ERROR(1216, index_id_, "Operator " << op << " failed for field '" << field << "': " << e.what());
+                throw;
             }
-            
+
             partial_results.push_back(std::move(or_result));
         }
 
@@ -436,11 +444,16 @@ public:
 
         if (partial_results.empty()) return ndd::RoaringBitmap();
 
+        // AND all conditions together. Start with smallest bitmap (index 0),
+        // then intersect with each subsequent bitmap. Short-circuit on empty result.
         ndd::RoaringBitmap final_result = partial_results[0];
         for(size_t i = 1; i < partial_results.size(); ++i) {
             final_result &= partial_results[i];
             // If result becomes empty, stop early
-            if(final_result.isEmpty()) return final_result;
+            if(final_result.isEmpty()) {
+                LOG_INFO(1219, index_id_, "Filter computation complete: early termination with empty result");
+                return final_result;
+            }
         }
 
         return final_result;
