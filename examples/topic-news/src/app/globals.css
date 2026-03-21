@@ -1,0 +1,48 @@
+@import "tailwindcss";
+@config "../../tailwind.config.ts";
+
+@layer base {
+  body {
+    @apply bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 antialiased h-screen;
+    font-family: 'Satoshi', sans-serif;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: 'Space Grotesk', sans-serif;
+  }
+
+  /* Scrollbar Utilities from Stitch */
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Glassmorphism utility for reusability if needed by modals */
+  .glass {
+    @apply bg-white/70 dark:bg-card-dark/70 backdrop-blur-md border border-white/20 dark:border-slate-800;
+  }
+
+  /* React Masonry CSS */
+  .pigeon-masonry-grid {
+    display: flex;
+    margin-left: -24px; /* match gap-6 (1.5rem = 24px) */
+    width: auto;
+  }
+  .pigeon-masonry-grid_column {
+    padding-left: 24px; /* match gap-6 */
+    background-clip: padding-box;
+  }
+  .pigeon-masonry-grid_column > div,
+  .pigeon-masonry-grid_column > article {
+    margin-bottom: 24px; /* match gap-6 vertically */
+  }
+}
