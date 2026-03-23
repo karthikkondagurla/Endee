@@ -1,113 +1,126 @@
-# Pigeon — AI-Powered Industry Tracker 🐦
+# Pigeon × Endee — AI-Powered News Intelligence
 
-**Live Demo:** [https://endee-blue.vercel.app](https://endee-blue.vercel.app)  
-**Vector DB URL (Endee):** [https://endee-oss-latest.onrender.com](https://endee-oss-latest.onrender.com)
+**Live Frontend (Vercel):** [https://endee-blue.vercel.app](https://endee-blue.vercel.app)
+**Live Vector DB (Render):** [https://endee-oss-latest.onrender.com/api/v1/health](https://endee-oss-latest.onrender.com/api/v1/health)
 
-Pigeon is an intelligent news and industry tracker that curates, digests, and makes news interactively searchable using Semantic Vector Search and RAG (Retrieval-Augmented Generation). 
-
-This project was built as an assignment to demonstrate the integration of the **Endee Vector Database** in a practical, production-ready AI/ML application.
+This project is a submission for **ENDEE OC.41989.2026.58432**. It is built on top of a forked version of the official [Endee Vector Database](https://github.com/endee-io/endee).
 
 ---
 
-## 🎯 Project Overview & Problem Statement
+## 1. Project Overview & Problem Statement
 
-**The Problem:**
-Professionals and researchers face information overload. Every day, thousands of articles, blog posts, and press releases are published across various industries. Traditional keyword-based search is often inadequate for research because it misses the *context* and *meaning* behind the news. Users waste time manually sifting through feeds to find relevant trends or answers.
+**The Problem:** Traditional news aggregation relies heavily on exact keyword matching and chronological sorting. This leads to noise, missed semantic connections, and an overwhelming amount of raw data that lacks synthesis or personalized discoverability.
 
-**The Solution:**
-Pigeon solves this by automatically ingesting news articles across user-selected topics, embedding them into a high-dimensional vector space, and allowing users to:
-1. **Semantically search** for concepts rather than exact keywords.
-2. **Chat with the news (RAG)** to get instant, AI-generated answers grounded in the latest articles.
-3. Automatically receive AI summaries of dense articles.
+**The Solution:** **Pigeon** is an AI-powered news intelligence platform that turns the internet's noise into a personal intelligence feed. By converting articles into 384-dimensional vector embeddings and storing them in the **Endee open-source vector database**, Pigeon enables:
+- Finding articles by meaning, not just exact keywords.
+- Grounding AI answers in real-time news (eliminating hallucinations).
+- Discovering related reads automatically based on semantic similarity.
 
 ---
 
-## 🏗️ System Design and Technical Approach
+## 2. Explanation of How Endee is Used
 
-Pigeon is built on a modern serverless architecture, separating the stateless frontend/API layer from the stateful AI and database layers.
+Pigeon heavily relies on the **Endee Vector Database** to power four core AI/ML use cases. All vectors are generated using the `all-MiniLM-L6-v2` transformer model (384 dimensions) and stored using Endee's high-performance HNSW index with INT8 quantization.
 
-### Architecture Stack
-* **Frontend:** Next.js 16 (React), Tailwind CSS, Vanilla styling.
-* **Backend:** Next.js Serverless API routes (deployed on Vercel).
-* **Vector Database:** [Endee](https://github.com/endee-io/endee) (Open-source vector DB, deployed on Render.com via Docker).
-* **LLM & Inference:** Groq API (for blazing-fast Llama-3 inference and text summarization) + `@xenova/transformers` (for local embedding generation).
+### Use Case 1: Semantic Search
+Instead of matching keywords, Pigeon converts the user's search query into a vector and performs a `cosine` similarity search in Endee. 
+*Example: Searching "chip shortage impact" will find articles titled "TSMC cuts semiconductor output forecast" because they are semantically close in the vector space.*
 
-### Key Workflows
-1. **Ingestion:** When a user visits the dashboard, articles are fetched based on their topics. The Next.js backend uses `all-MiniLM-L6-v2` to instantly generate 384-dimensional vector embeddings of the articles and upserts them into the Endee DB.
-2. **Semantic Search:** User queries are embedded into vectors and sent to Endee to perform a high-speed cosine similarity search (k-NN) against the indexed articles.
-3. **RAG (Retrieval-Augmented Generation):** Users ask a question. The system embeds the question, retrieves the top `K` most relevant articles from Endee, and constructs a prompt for the Groq LLM. The LLM streams back a conversational answer grounded purely in those retrieved articles.
+### Use Case 2: RAG (Retrieval-Augmented Generation)
+When a user asks a question via the "Ask AI" panel, Pigeon embeds the question, queries Endee for the top-5 most relevant articles, and injects that context into the Groq LLM (Llama 3.1 8B). This ensures the AI's answer is strictly grounded in recent news and fully cited.
 
----
+### Use Case 3: Article Recommendations
+When viewing the Semantic Results tab, Pigeon surfaces similar articles automatically. Because Endee returns exact distance scores, the UI can confidently display related content without any manual tagging.
 
-## 🧠 How Endee is Used
-
-Endee is the core intellectual engine of this project. It serves as the single source of truth for semantic context. 
-
-Specifically, Endee is implemented to power three primary features:
-
-1. **Semantic Search (`/api/endee/search`)**
-   Whenever a user searches using the header UI, the query is embedded and sent to Endee using `client.search()`. Endee instantly returns the top-K closest vectors, allowing the app to render articles that match the visual and structural context of the query, not just exact keywords.
-
-2. **RAG Context Retrieval (`/api/rag`)**
-   For the "Ask AI" feature, Endee acts as the exact knowledge base. When a user asks "What are the latest AI chip trends?", Endee retrieves the closest historical articles. These articles are fed to the Groq LLM to prevent hallucinations, ensuring the AI only answers based on factual grounding.
-
-3. **Dynamic Upsertion (`/api/endee/upsert`)**
-   Endee handles real-time updates. As the app encounters new articles from RSS feeds or APIs, it streams them directly into the Endee instance (`client.upsert()`). The `pigeon_articles` index is configured to use the `cosine` space type with `INT8` precision for optimal memory usage and speed.
+### Use Case 4: Agentic AI Workflows
+Pigeon features a Daily Digest Agent powered by Vercel CRON. Every 24 hours, the agent autonomously:
+1. Fetches the latest RSS feeds.
+2. Embeds the articles and **upserts them into Endee**.
+3. **Retrieves** the top 10 most relevant articles per topic via Endee vector search.
+4. Generates a structured daily briefing via Groq LLM.
 
 ---
 
-## ⚙️ Setup and Execution Instructions
+## 3. System Design and Technical Approach
 
-### Prerequisites
-* Node.js v20+
-* Docker & Docker Compose (for the Endee Database)
-* A free Groq API Key ([Get one here](https://console.groq.com/keys))
+### Architecture Diagram
+```
+┌─────────────────────────────────────────────────────┐
+│                    USER BROWSER                      │
+│              Next.js Frontend (React)                │
+└──────────────────────┬──────────────────────────────┘
+                       │ HTTPS
+┌──────────────────────▼──────────────────────────────┐
+│              VERCEL (Next.js API Routes)             │
+│  - /api/news          → fetch RSS + Endee upsert     │
+│  - /api/endee/search  → generate embedding + search  │
+│  - /api/rag           → Endee retrieve + Groq stream │
+│  - /api/cron/digest   → Autonomous agentic loop      │
+└────────────┬──────────────────────┬─────────────────┘
+             │                      │
+      ┌──────▼──────┐        ┌──────▼──────────┐
+      │  Groq API   │        │  Endee DB        │
+      │ (Llama 3.1) │        │ (Render Web Svc) │
+      │  RAG Gen    │        │  pigeon_articles │
+      └─────────────┘        └─────────────────┘
+```
+
+### Tech Stack
+- **Frontend & API:** Next.js 16 (App Router), React, Tailwind CSS 4
+- **Vector Database:** Endee (Open Source C++ Vector DB) deployed via Docker
+- **Embedding Model:** `@xenova/transformers` (`all-MiniLM-L6-v2`) running serverlessly
+- **LLM Provider:** Groq (Llama 3.1 8B) for high-speed RAG and summarization
+- **Deployment:** Vercel (Frontend/APIs) and Render.com (Endee DB)
+
+---
+
+## 4. Setup and Execution Instructions
 
 ### Local Development Setup
 
 **1. Clone the repository**
 ```bash
-git clone https://github.com/YOUR_USERNAME/Endee.git
+git clone https://github.com/karthikkondagurla/Endee.git
 cd Endee
 ```
 
-**2. Configure Environment Variables**
-Copy the example environment file:
+**2. First-Time Setup (Docker)**
+The project includes a unified setup script to build the Endee C++ engine and the Next.js app locally using Docker Compose.
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+**3. Environment Variables**
+Copy the example environment file and fill in your Groq API key:
 ```bash
 cp .env.example .env.local
 ```
-Inside `.env.local`, add your Groq API key:
+Edit `.env.local`:
 ```env
-GROQ_API_KEY=gsk_your_key_here
+GROQ_API_KEY=gsk_your_groq_api_key
 ENDEE_URL=http://localhost:8080/api/v1
+CRON_SECRET=your_random_secret
+DIGEST_TOPICS=artificial intelligence,startups,climate tech
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
-**3. Start the Endee Vector Database (via Docker)**
-Endee runs locally using Docker. We've included a setup script that builds the image from source and starts the DB:
+**4. Start the Full Stack**
+To start both the Next.js app and the local Endee vector database container:
 ```bash
-# Make script executable and run
-chmod +x setup.sh
-./setup.sh
-
-# Alternatively, just use docker compose:
-docker compose up endee-oss -d
+docker compose up -d
 ```
-*Endee will now be running at `http://localhost:8080`.*
+- The Pigeon App will be running at: `http://localhost:3000`
+- The Endee DB will be running at: `http://localhost:8080`
 
-**4. Start the Next.js Application**
-In a new terminal, install the dependencies and start the dev server:
-```bash
-# Install Node dependencies
-npm install
+*Alternatively, if you only want to run Endee in Docker and Next.js natively, you can run `make endee` followed by `npm install && npm run dev`.*
 
-# Start the dev server
-npm run dev
-```
-
-**5. Access the App**
-Open [http://localhost:3000](http://localhost:3000) in your browser. 
-Add a few topics (e.g., "Technology", "Startups") to trigger the automatic ingestion of articles into your local Endee instance. You can then immediately start using the Semantic Search and RAG features!
+### Deployment Notes
+The live version uses a distributed architecture:
+1. **Endee** was built into a Docker image (`infra/Dockerfile`) and pushed to Docker Hub, then deployed as a Web Service on **Render.com**.
+2. **Next.js** was deployed to **Vercel** (`.vercelignore` is used to skip the heavy C++ build files).
+3. Vercel environment variables point to the Render Endee instance URL.
 
 ---
 
-> **Note to Evaluators:** Because this repository is a fork of the official Endee repo (as per the strict assignment guidelines), the pigeon application code resides within the same directory as the Endee source code. The Next.js app is located in `./src/app` while Endee's C++ source is in `./src/core`, `./src/server`, etc.
+> **Note on Mandatory Steps**: This project was built on top of a fork of the official `endee-io/endee` repository, and the official repo has been starred as required by the assignment guidelines.
