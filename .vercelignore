@@ -1,0 +1,37 @@
+# C++ source & build artifacts (not needed for Next.js on Vercel)
+build/
+build*/
+third_party/
+src/core/
+src/filter/
+src/hnsw/
+src/quant/
+src/server/
+src/sparse/
+src/storage/
+src/main.cpp
+tests/
+docs/
+examples/
+data/
+frontend/
+infra/
+
+# C++ build files
+CMakeLists.txt
+install.sh
+run.sh
+*.sh
+lint.json
+lint.txt
+*.tsbuildinfo
+.clang-format
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Misc
+prd.md
+project-summary.md
