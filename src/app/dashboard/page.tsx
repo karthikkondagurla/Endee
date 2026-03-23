@@ -37,6 +37,13 @@ export default function DashboardPage() {
     const [isSearching, setIsSearching] = useState(false);
     const [searchDone, setSearchDone] = useState(false);
 
+    // RAG Q&A state
+    const [ragQuestion, setRagQuestion] = useState("");
+    const [ragAnswer, setRagAnswer] = useState("");
+    const [ragSources, setRagSources] = useState<any[]>([]);
+    const [isRagLoading, setIsRagLoading] = useState(false);
+    const [showRagPanel, setShowRagPanel] = useState(false);
+
     // Initialise Endee index (fire-and-forget, graceful degradation)
     useEffect(() => {
         fetch('/api/endee/init')
@@ -180,6 +187,48 @@ export default function DashboardPage() {
         }
     };
 
+    // 7. RAG Q&A: stream grounded answer from Groq via Endee-retrieved context
+    const handleRagAsk = async () => {
+        if (!ragQuestion.trim() || isRagLoading || !groqApiKey) return;
+        setIsRagLoading(true);
+        setRagAnswer('');
+        setRagSources([]);
+        try {
+            const res = await fetch('/api/rag', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: ragQuestion.trim(), apiKey: groqApiKey }),
+            });
+
+            if (!res.ok || !res.body) throw new Error('RAG request failed');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                        const payload = JSON.parse(line.slice(6));
+                        if (payload.type === 'sources') setRagSources(payload.sources || []);
+                        else if (payload.type === 'token') setRagAnswer(prev => prev + payload.content);
+                    } catch { /* ignore parse errors */ }
+                }
+            }
+        } catch (err) {
+            console.warn('[RAG] Error:', err);
+            setRagAnswer('Failed to get an answer. Please try again.');
+        } finally {
+            setIsRagLoading(false);
+        }
+    };
+
     const displayedArticles = useMemo(() => {
         const sorted = [...articles];
         if (activeTab === 'latest') {
@@ -231,8 +280,26 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    {/* Endee Status Badge */}
-                    <div className="px-6 pb-6 mt-auto">
+                    {/* Bottom sidebar area */}
+                    <div className="px-6 pb-6 mt-auto space-y-3">
+                        {/* Ask AI (RAG) Button */}
+                        <button
+                            onClick={() => setShowRagPanel(p => !p)}
+                            disabled={!endeeOnline || !groqApiKey}
+                            title={!groqApiKey ? 'Add Groq API Key to enable' : !endeeOnline ? 'Endee must be online' : 'Ask AI a question grounded in your articles'}
+                            className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all border ${
+                                showRagPanel
+                                    ? 'bg-violet-600 text-white border-violet-700'
+                                    : endeeOnline && groqApiKey
+                                    ? 'bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-400 border-violet-200 dark:border-violet-800 hover:bg-violet-100'
+                                    : 'bg-slate-50 dark:bg-slate-800 text-slate-400 border-slate-200 dark:border-slate-700 cursor-not-allowed opacity-60'
+                            }`}
+                        >
+                            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>forum</span>
+                            Ask AI (RAG)
+                        </button>
+
+                        {/* Endee Status Badge */}
                         <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border ${endeeOnline === true
                             ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800'
                             : endeeOnline === false
@@ -291,6 +358,87 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="max-w-5xl mx-auto p-8 space-y-10 pb-20">
+
+                    {/* RAG Q&A Panel */}
+                    {showRagPanel && (
+                        <div className="bg-violet-50/80 dark:bg-violet-900/10 border border-violet-200 dark:border-violet-800/50 rounded-2xl p-5 space-y-4 backdrop-blur-xl shadow-sm">
+                            <div className="flex items-center gap-2">
+                                <span className="material-symbols-outlined text-violet-600" style={{ fontSize: '20px' }}>forum</span>
+                                <h3 className="text-sm font-bold text-violet-900 dark:text-violet-200">Ask AI — Grounded in your articles</h3>
+                                <span className="text-[10px] font-mono text-violet-500 bg-violet-100 dark:bg-violet-900/40 px-2 py-0.5 rounded-full ml-auto">RAG • Powered by Endee + Groq</span>
+                            </div>
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    placeholder="e.g. What's happening with AI chip development this week?"
+                                    value={ragQuestion}
+                                    onChange={e => setRagQuestion(e.target.value)}
+                                    onKeyDown={e => e.key === 'Enter' && handleRagAsk()}
+                                    disabled={isRagLoading}
+                                    className="flex-1 px-4 py-2.5 rounded-xl border border-violet-200 dark:border-violet-700/60 bg-white dark:bg-violet-950/30 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-400/50 disabled:opacity-60 transition-all"
+                                />
+                                <button
+                                    onClick={handleRagAsk}
+                                    disabled={isRagLoading || !ragQuestion.trim()}
+                                    className="px-5 py-2.5 bg-violet-600 text-white text-sm font-bold rounded-xl hover:bg-violet-700 disabled:opacity-50 transition-all active:scale-95 whitespace-nowrap flex items-center gap-1.5"
+                                >
+                                    {isRagLoading ? (
+                                        <span className="material-symbols-outlined animate-spin" style={{ fontSize: '16px' }}>progress_activity</span>
+                                    ) : (
+                                        <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>send</span>
+                                    )}
+                                    Ask
+                                </button>
+                            </div>
+
+                            {/* Streamed Answer */}
+                            {(ragAnswer || isRagLoading) && (
+                                <div className="bg-white dark:bg-violet-950/20 rounded-xl border border-violet-100 dark:border-violet-800/30 p-4 space-y-3">
+                                    {ragAnswer ? (
+                                        <p className="text-sm text-slate-800 dark:text-slate-200 whitespace-pre-wrap leading-relaxed">
+                                            {ragAnswer}
+                                            {isRagLoading && <span className="inline-block w-1.5 h-4 bg-violet-500 ml-0.5 animate-pulse" />}
+                                        </p>
+                                    ) : (
+                                        <div className="space-y-2 animate-pulse">
+                                            <div className="h-3 bg-violet-100 dark:bg-violet-900/40 rounded w-full" />
+                                            <div className="h-3 bg-violet-100 dark:bg-violet-900/40 rounded w-4/5" />
+                                            <div className="h-3 bg-violet-100 dark:bg-violet-900/40 rounded w-full" />
+                                        </div>
+                                    )}
+
+                                    {/* Citation Sources */}
+                                    {ragSources.length > 0 && (
+                                        <div className="pt-3 border-t border-violet-100 dark:border-violet-800/30">
+                                            <p className="text-[10px] font-bold text-violet-500 uppercase tracking-wider mb-2">Sources</p>
+                                            <div className="space-y-1">
+                                                {ragSources.map((src, i) => (
+                                                    <a
+                                                        key={i}
+                                                        href={src.link}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400 hover:text-violet-600 dark:hover:text-violet-300 transition-colors"
+                                                    >
+                                                        <span className="flex-shrink-0 w-4 h-4 bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-300 rounded-full text-[9px] font-bold flex items-center justify-center">
+                                                            {src.index}
+                                                        </span>
+                                                        <span className="truncate">{src.title}</span>
+                                                        <span className="flex-shrink-0 text-slate-400">— {src.sourceName}</span>
+                                                        {src.similarity !== undefined && (
+                                                            <span className="flex-shrink-0 text-[9px] bg-violet-50 dark:bg-violet-900/20 text-violet-500 px-1.5 py-0.5 rounded-full">
+                                                                {Math.round(src.similarity * 100)}%
+                                                            </span>
+                                                        )}
+                                                    </a>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Top Controls Row */}
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

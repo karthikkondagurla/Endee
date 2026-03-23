@@ -14,6 +14,7 @@ export interface Article {
     rank?: number;
     imageUrl?: string;
     description?: string;
+    similarity?: number; // Cosine similarity score from Endee (0–1)
 }
 
 interface NewsCardProps {
@@ -109,6 +110,12 @@ export default function NewsCard({ article, groqApiKey }: NewsCardProps) {
                     <span className="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full border border-slate-200/50 dark:border-slate-700/50">
                         {article.topic || "News"}
                     </span>
+                    {article.similarity !== undefined && article.similarity > 0 && (
+                        <span className="bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1">
+                            <span className="material-symbols-outlined" style={{ fontSize: '11px' }}>psychology</span>
+                            {Math.round(article.similarity * 100)}% match
+                        </span>
+                    )}
                 </div>
                 <h2
                     className="text-[17px] font-extrabold text-slate-900 dark:text-slate-100 leading-snug tracking-tight mb-2 group-hover:text-primary transition-colors cursor-pointer"

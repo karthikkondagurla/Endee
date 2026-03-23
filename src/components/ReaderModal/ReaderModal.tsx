@@ -13,11 +13,13 @@ export default function ReaderModal() {
     // Metadata & AI State from backend
     const [summary, setSummary] = useState<string[]>([]);
     const [sentiment, setSentiment] = useState<string | null>(null);
-
     const [author, setAuthor] = useState<string | null>(null);
-
     const [isLoadingAI, setIsLoadingAI] = useState(false);
     const [aiError, setAiError] = useState<string | null>(null);
+
+    // Recommendations state
+    const [recommendations, setRecommendations] = useState<any[]>([]);
+    const [isLoadingRecs, setIsLoadingRecs] = useState(false);
 
     // Prevent body scroll when open
     useEffect(() => {
@@ -28,6 +30,30 @@ export default function ReaderModal() {
         }
     }, [isReaderOpen]);
 
+    // Fetch recommendations from Endee when article opens
+    useEffect(() => {
+        if (!currentArticle || !isReaderOpen) {
+            setRecommendations([]);
+            return;
+        }
+        let cancelled = false;
+        setIsLoadingRecs(true);
+        fetch('/api/endee/recommend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                articleLink: currentArticle.link,
+                title: currentArticle.title,
+                contentSnippet: currentArticle.contentSnippet,
+            }),
+        })
+            .then(r => r.json())
+            .then(data => { if (!cancelled) setRecommendations(data.results || []); })
+            .catch(() => { if (!cancelled) setRecommendations([]); })
+            .finally(() => { if (!cancelled) setIsLoadingRecs(false); });
+        return () => { cancelled = true; };
+    }, [currentArticle, isReaderOpen]);
+
     // Auto-fetch the full article summary and metadata on open
     useEffect(() => {
         if (!currentArticle) return;
@@ -35,7 +61,6 @@ export default function ReaderModal() {
         setIsSaved(false);
         setSummary([]);
         setSentiment(null);
-
         setAuthor(null);
         setAiError(null);
 
@@ -246,6 +271,48 @@ export default function ReaderModal() {
                             )}
 
                         </div>
+
+                        {/* Similar Articles Panel (Endee Recommendations) */}
+                        {(isLoadingRecs || recommendations.length > 0) && (
+                            <div className="mt-12 pt-8 border-t border-slate-200 dark:border-slate-800">
+                                <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider mb-4">
+                                    <span className="material-symbols-outlined text-violet-500" style={{ fontSize: '18px' }}>linked_services</span>
+                                    Similar Articles
+                                    <span className="text-[10px] font-mono text-violet-500 bg-violet-100 dark:bg-violet-900/30 px-2 py-0.5 rounded-full">Powered by Endee</span>
+                                </h3>
+                                {isLoadingRecs ? (
+                                    <div className="space-y-3">
+                                        {[1, 2, 3].map(i => (
+                                            <div key={i} className="h-14 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse" />
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {recommendations.map((rec, i) => (
+                                            <a
+                                                key={i}
+                                                href={rec.link}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="flex items-start justify-between gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-700/50 hover:border-violet-300 dark:hover:border-violet-700 hover:bg-violet-50/50 dark:hover:bg-violet-900/10 transition-all group"
+                                            >
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-[13px] font-semibold text-slate-800 dark:text-slate-200 group-hover:text-violet-700 dark:group-hover:text-violet-300 transition-colors line-clamp-2 leading-snug">
+                                                        {rec.title}
+                                                    </p>
+                                                    <p className="text-[11px] text-slate-400 mt-0.5">{rec.sourceName}</p>
+                                                </div>
+                                                {rec.similarity !== undefined && (
+                                                    <span className="flex-shrink-0 bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 text-[10px] font-bold px-2 py-1 rounded-full">
+                                                        {Math.round(rec.similarity * 100)}%
+                                                    </span>
+                                                )}
+                                            </a>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                     </div>
                 </div>
