@@ -1,0 +1,57 @@
+# Version control
+.git
+.gitignore
+
+# Endee C++ source & build (not needed for the Next.js app image)
+build/
+tests/
+docs/
+examples/
+third_party/
+infra/
+data/
+frontend/
+CMakeLists.txt
+install.sh
+run.sh
+*.sh
+lint.json
+lint.txt
+
+# Next.js build output (rebuilt inside Docker)
+.next
+out
+
+# Node modules (reinstalled inside Docker)
+node_modules
+
+# Environment files (injected at runtime, never baked in)
+.env
+.env.local
+.env.*.local
+
+# Dev / testing files
+*.test.ts
+*.spec.ts
+tests/
+__tests__/
+coverage/
+
+# Editor config
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Misc
+prd.md
+project-summary.md
+README.md

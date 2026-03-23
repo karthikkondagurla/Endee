@@ -1,0 +1,41 @@
+# ── infra/Dockerfile.dockerignore ──────────────────────────────────────────
+# This file controls the build context for infra/Dockerfile (Endee C++ build).
+# It OVERRIDES the root .dockerignore for this specific Dockerfile.
+# C++ source (src/, third_party/, CMakeLists.txt, install.sh) is INCLUDED.
+
+# Version control
+.git
+.gitignore
+
+# Node.js/Next.js (not needed for C++ build)
+node_modules/
+.next/
+out/
+*.log
+npm-debug.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Test / docs
+tests/
+__tests__/
+coverage/
+docs/
+*.test.ts
+*.spec.ts
+
+# Misc
+prd.md
+project-summary.md
+README.md
